@@ -30,14 +30,24 @@ URL_REGEX = re.compile(
     re.IGNORECASE
 )
 
-SHOPEE_REGEX = re.compile(
+# Domain Shopee chính thức
+SHOPEE_DIRECT_REGEX = re.compile(
     r'(?:https?://)?(?:[a-z0-9.-]*)'
-    r'(?:shopee\.vn|shope\.ee|sandeal\.co|hoisansale\.pro|'
-    r'nghien\.co|thanhsansale\.online|app\.shopeepay\.vn|s\.5anm\.net|shp\.ee)'
+    r'(?:shopee\.vn|shope\.ee|app\.shopeepay\.vn|s\.5anm\.net|shp\.ee)'
     r'[^\s\n\r,<>"]*',
     re.IGNORECASE
 )
 
+# Domain rút gọn không rõ đích (có thể là Shopee hoặc Lazada)
+# → cần follow để biết đích rồi mới xử lý
+SHORT_UNKNOWN_REGEX = re.compile(
+    r'(?:https?://)?'
+    r'(?:sandeal\.co|hoisansale\.pro|nghien\.co|thanhsansale\.online|bit\.ly|tinyurl\.com)'
+    r'/[^\s\n\r,<>"]*',
+    re.IGNORECASE
+)
+
+# Domain Lazada chính thức
 LAZADA_REGEX = re.compile(
     r'(?:https?://)?'
     r'(?:'
@@ -181,21 +191,18 @@ async def laz_resolve_short_url(url: str) -> str:
     final_url = result["finalUrl"]
     body      = result["body"]
 
-    # JS redirect lần 1
     next_url = laz_find_js_redirect(body)
     if next_url and next_url.startswith("http"):
         second = await laz_follow_url(next_url, url)
         if second:
             final_url = second["finalUrl"]
             body      = second["body"]
-            # JS redirect lần 2
             next_url2 = laz_find_js_redirect(body)
             if next_url2 and next_url2.startswith("http"):
                 third = await laz_follow_url(next_url2, final_url)
                 if third:
                     final_url = third["finalUrl"]
 
-    # Vẫn còn c.lazada → follow thêm
     if re.search(r'c\.lazada\.', final_url, re.I):
         extra = await laz_follow_url(final_url, url)
         if extra:
@@ -250,6 +257,50 @@ def laz_extract_product_id(url: str) -> str | None:
 def laz_is_lazada_domain(host: str) -> bool:
     return "lazada." in host.lower()
 
+def is_shopee_domain(host: str) -> bool:
+    return bool(re.search(r'shopee\.|shope\.ee', host, re.I))
+
+# ============================================================
+# FOLLOW URL KHÔNG RÕ ĐÍCH → phát hiện Shopee hay Lazada
+# ============================================================
+async def follow_unknown_url(url: str) -> tuple[str, str]:
+    """
+    Follow URL không rõ đích.
+    Trả về (final_url, loại): loại = 'shopee' | 'lazada' | 'unknown'
+    """
+    if not re.match(r'https?://', url, re.I):
+        url = "https://" + url
+
+    result = await laz_follow_url(url)
+    if not result:
+        return url, "unknown"
+
+    final_url  = result["finalUrl"]
+    final_host = urlparse(final_url).netloc.lower()
+
+    if is_shopee_domain(final_host):
+        logging.info(f"[Unknown] {url[:50]} → Shopee: {final_url[:60]}")
+        return final_url, "shopee"
+
+    if laz_is_lazada_domain(final_host):
+        logging.info(f"[Unknown] {url[:50]} → Lazada: {final_url[:60]}")
+        return final_url, "lazada"
+
+    # Thử parse JS nếu chưa ra đích
+    next_url = laz_find_js_redirect(result["body"])
+    if next_url and next_url.startswith("http"):
+        second     = await laz_follow_url(next_url, final_url)
+        if second:
+            final_url  = second["finalUrl"]
+            final_host = urlparse(final_url).netloc.lower()
+            if is_shopee_domain(final_host):
+                return final_url, "shopee"
+            if laz_is_lazada_domain(final_host):
+                return final_url, "lazada"
+
+    logging.warning(f"[Unknown] Không nhận ra đích: {final_url[:60]}")
+    return final_url, "unknown"
+
 # ============================================================
 # LAZADA FLOW CHÍNH
 # ============================================================
@@ -263,17 +314,14 @@ async def laz_get_tracking(raw: str) -> str | None:
     if laz_is_short_domain(url):
         resolved = await laz_resolve_short_url(url)
         if laz_is_homepage(resolved):
-            logging.warning(f"[Lazada] Resolved to homepage, skip")
             return None
         url = resolved
-
     elif not laz_is_lazada_domain(host):
         result = await laz_follow_url(url)
         if not result:
             return None
         final_host = urlparse(result["finalUrl"]).netloc.lower()
         if not laz_is_lazada_domain(final_host):
-            logging.warning(f"[Lazada] Không ra domain Lazada: {result['finalUrl'][:60]}")
             return None
         url = result["finalUrl"]
 
@@ -351,37 +399,66 @@ async def process_rut(text: str) -> str:
             pass
     return result
 
-async def process_shopee(text: str) -> str:
-    result  = text
-    matches = list(dict.fromkeys(SHOPEE_REGEX.findall(text)))
-    for raw in matches:
+async def process_shopee_direct(text: str, url: str, raw: str) -> str:
+    """Xử lý 1 URL Shopee đã biết chắc là Shopee."""
+    real_url = await shopee_get_final_url(url)
+    real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
+    if re.search(r'shopee\.vn|shope\.ee', real_url, re.I):
+        try:
+            short = await shorten(shopee_build_aff(real_url))
+            return text.replace(raw, short, 1)
+        except Exception:
+            pass
+    return text
+
+async def process_lazada_direct(text: str, url: str, raw: str) -> str:
+    """Xử lý 1 URL Lazada đã biết chắc là Lazada."""
+    tracking = await laz_get_tracking(url)
+    if tracking:
+        try:
+            short = await shorten(tracking)
+            return text.replace(raw, short, 1)
+        except Exception as e:
+            logging.error(f"[Lazada] Lỗi rút gọn: {e}")
+    return text
+
+async def process_all(text: str) -> str:
+    result = text
+
+    # 1. Xử lý Shopee domain chính thức
+    for raw in list(dict.fromkeys(SHOPEE_DIRECT_REGEX.findall(text))):
+        clean = raw.rstrip(".,!? ")
+        url   = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
+        result = await process_shopee_direct(result, url, raw)
+
+    # 2. Xử lý Lazada domain chính thức
+    for raw in list(dict.fromkeys(LAZADA_REGEX.findall(text))):
+        clean = raw.rstrip(".,!? ")
+        result = await process_lazada_direct(result, clean, raw)
+
+    # 3. Xử lý domain không rõ đích (sandeal.co, hoisansale.pro, ...)
+    for raw in list(dict.fromkeys(SHORT_UNKNOWN_REGEX.findall(text))):
         clean    = raw.rstrip(".,!? ")
         url      = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
-        real_url = await shopee_get_final_url(url)
-        real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
-        if re.search(r'shopee\.vn|shope\.ee', real_url, re.I):
+        final_url, dest = await follow_unknown_url(url)
+
+        if dest == "shopee":
+            final_url = final_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
             try:
-                short  = await shorten(shopee_build_aff(real_url))
+                short  = await shorten(shopee_build_aff(final_url))
                 result = result.replace(raw, short, 1)
             except Exception:
                 pass
-    return result
 
-async def process_lazada(text: str) -> str:
-    result  = text
-    matches = list(dict.fromkeys(LAZADA_REGEX.findall(text)))
-    for raw in matches:
-        clean    = raw.rstrip(".,!? ")
-        tracking = await laz_get_tracking(clean)
-        if tracking:
-            try:
-                short  = await shorten(tracking)
-                result = result.replace(raw, short, 1)
-                logging.info(f"[Lazada] {clean[:40]} → {short}")
-            except Exception as e:
-                logging.error(f"[Lazada] Lỗi rút gọn: {e}")
-        else:
-            logging.warning(f"[Lazada] Bỏ qua: {clean[:60]}")
+        elif dest == "lazada":
+            tracking = await laz_get_tracking(final_url)
+            if tracking:
+                try:
+                    short  = await shorten(tracking)
+                    result = result.replace(raw, short, 1)
+                except Exception:
+                    pass
+
     return result
 
 # ============================================================
@@ -403,6 +480,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Bot Rút Gọn Link</b>\n\n"
         "🛒 Gửi link Shopee → affiliate + rút gọn\n"
         "💙 Gửi link Lazada → affiliate (API chính thức) + rút gọn\n"
+        "🔀 Domain rút gọn lạ → tự follow, nhận diện Shopee/Lazada\n"
         "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần\n"
         "🔑 /aff [id] → xem/đổi Shopee Affiliate ID\n"
         "🌐 /dm [domain] → xem/đổi domain rút gọn\n\n"
@@ -413,7 +491,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_aff_id
-
     if not context.args:
         await update.message.reply_text(
             f"🔑 Affiliate ID hiện tại: <code>{current_aff_id}</code>\n\n"
@@ -421,12 +498,10 @@ async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         return
-
     new_id = context.args[0].strip()
     if not re.match(r'^\d+$', new_id):
         await update.message.reply_text("⚠️ ID không hợp lệ, chỉ nhập số!\nVí dụ: /aff 17317300048")
         return
-
     old_id         = current_aff_id
     current_aff_id = new_id
     await update.message.reply_text(
@@ -438,7 +513,6 @@ async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_api_url
-
     if not context.args:
         current_domain = current_api_url.replace("/api.php", "")
         await update.message.reply_text(
@@ -449,14 +523,11 @@ async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         return
-
     new_domain = context.args[0].strip().rstrip("/")
     if not re.match(r'https?://', new_domain, re.I):
         new_domain = "https://" + new_domain
-
     old_domain      = current_api_url.replace("/api.php", "")
     current_api_url = f"{new_domain}/api.php"
-
     await update.message.reply_text(
         f"✅ Đã đổi domain rút gọn!\n\n"
         f"Cũ: <code>{old_domain}</code>\n"
@@ -467,7 +538,6 @@ async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full = update.message.text or ""
     text = re.sub(r'^/rut\s*', '', full, flags=re.IGNORECASE).strip()
-
     if not text:
         if update.message.reply_to_message and update.message.reply_to_message.text:
             text = update.message.reply_to_message.text
@@ -479,40 +549,33 @@ async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Hoặc reply vào tin nhắn rồi gõ /rut"
             )
             return
-
     if not URL_REGEX.search(text):
         await update.message.reply_text("⚠️ Không tìm thấy link nào.")
         return
-
     await send_result(update, await process_rut(text))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
 
-    has_shopee = bool(SHOPEE_REGEX.search(text))
-    has_lazada = bool(LAZADA_REGEX.search(text))
+    has_shopee  = bool(SHOPEE_DIRECT_REGEX.search(text))
+    has_lazada  = bool(LAZADA_REGEX.search(text))
+    has_unknown = bool(SHORT_UNKNOWN_REGEX.search(text))
 
-    if not has_shopee and not has_lazada:
+    if not has_shopee and not has_lazada and not has_unknown:
         return
 
     await update.message.reply_text("⏳ Đang xử lý...")
-
-    result = text
-    if has_shopee:
-        result = await process_shopee(result)
-    if has_lazada:
-        result = await process_lazada(result)
-
+    result = await process_all(text)
     await send_result(update, result)
 
 # ============================================================
 # FASTAPI
 # ============================================================
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
-ptb_app.add_handler(CommandHandler("start",  cmd_start))
-ptb_app.add_handler(CommandHandler("rut",    cmd_rut))
-ptb_app.add_handler(CommandHandler("aff",    cmd_aff))
-ptb_app.add_handler(CommandHandler("dm",     cmd_dm))
+ptb_app.add_handler(CommandHandler("start", cmd_start))
+ptb_app.add_handler(CommandHandler("rut",   cmd_rut))
+ptb_app.add_handler(CommandHandler("aff",   cmd_aff))
+ptb_app.add_handler(CommandHandler("dm",    cmd_dm))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @asynccontextmanager
