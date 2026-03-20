@@ -6,13 +6,15 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 # ========== CẤU HÌNH ==========
-BOT_TOKEN      = os.environ.get("BOT_TOKEN")
-API_URL        = os.environ.get("API_URL", "https://s.allvn.top/api.php")
-WEBHOOK_URL    = os.environ.get("WEBHOOK_URL")
+BOT_TOKEN       = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL     = os.environ.get("WEBHOOK_URL")
 
-SHOPEE_SUB_ID  = "----CR--"
-SHOPEE_AFF_ID  = os.environ.get("SHOPEE_AFF_ID", "17350890105")
-current_aff_id = SHOPEE_AFF_ID  # có thể thay đổi runtime bằng /aff
+SHOPEE_SUB_ID   = "----CR--"
+SHOPEE_AFF_ID   = os.environ.get("SHOPEE_AFF_ID", "17350890105")
+current_aff_id  = SHOPEE_AFF_ID
+
+API_URL         = os.environ.get("API_URL", "https://s.allvn.top/api.php")
+current_api_url = API_URL
 
 LAZ_APP_KEY    = os.environ.get("LAZ_APP_KEY",    "105827")
 LAZ_APP_SECRET = os.environ.get("LAZ_APP_SECRET", "r8ZMKhPxu1JZUCwTUBVMJiJnZKjhWeQF")
@@ -317,10 +319,11 @@ def shopee_build_aff(real_url: str) -> str:
 # SHORTEN
 # ============================================================
 async def shorten(long_url: str) -> str:
+    global current_api_url
     if not re.match(r'https?://', long_url, re.I):
         long_url = "https://" + long_url
     async with httpx.AsyncClient(timeout=10) as c:
-        r = await c.post(API_URL, data={"long_url": long_url})
+        r = await c.post(current_api_url, data={"long_url": long_url})
         d = r.json()
         if "short_url" in d:
             return d["short_url"]
@@ -394,21 +397,23 @@ async def send_result(update: Update, text: str):
 # HANDLERS
 # ============================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global current_aff_id
+    global current_aff_id, current_api_url
+    current_domain = current_api_url.replace("/api.php", "")
     await update.message.reply_text(
         "🤖 <b>Bot Rút Gọn Link</b>\n\n"
         "🛒 Gửi link Shopee → affiliate + rút gọn\n"
         "💙 Gửi link Lazada → affiliate (API chính thức) + rút gọn\n"
         "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần\n"
-        "🔑 /aff [id] → xem hoặc đổi Shopee Affiliate ID\n\n"
-        f"💡 Affiliate ID hiện tại: <code>{current_aff_id}</code>",
+        "🔑 /aff [id] → xem/đổi Shopee Affiliate ID\n"
+        "🌐 /dm [domain] → xem/đổi domain rút gọn\n\n"
+        f"Affiliate ID: <code>{current_aff_id}</code>\n"
+        f"Domain: <code>{current_domain}</code>",
         parse_mode="HTML"
     )
 
 async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_aff_id
 
-    # Không có argument → hiển thị ID hiện tại
     if not context.args:
         await update.message.reply_text(
             f"🔑 Affiliate ID hiện tại: <code>{current_aff_id}</code>\n\n"
@@ -418,18 +423,44 @@ async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     new_id = context.args[0].strip()
-
     if not re.match(r'^\d+$', new_id):
         await update.message.reply_text("⚠️ ID không hợp lệ, chỉ nhập số!\nVí dụ: /aff 17317300048")
         return
 
     old_id         = current_aff_id
     current_aff_id = new_id
-
     await update.message.reply_text(
         f"✅ Đã đổi Shopee Affiliate ID!\n\n"
         f"Cũ: <code>{old_id}</code>\n"
         f"Mới: <code>{current_aff_id}</code>",
+        parse_mode="HTML"
+    )
+
+async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global current_api_url
+
+    if not context.args:
+        current_domain = current_api_url.replace("/api.php", "")
+        await update.message.reply_text(
+            f"🌐 Domain rút gọn hiện tại: <code>{current_domain}</code>\n\n"
+            f"Để đổi:\n"
+            f"• <code>/dm s.allvn.top</code>\n"
+            f"• <code>/dm s.salevn.top</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    new_domain = context.args[0].strip().rstrip("/")
+    if not re.match(r'https?://', new_domain, re.I):
+        new_domain = "https://" + new_domain
+
+    old_domain      = current_api_url.replace("/api.php", "")
+    current_api_url = f"{new_domain}/api.php"
+
+    await update.message.reply_text(
+        f"✅ Đã đổi domain rút gọn!\n\n"
+        f"Cũ: <code>{old_domain}</code>\n"
+        f"Mới: <code>{new_domain}</code>",
         parse_mode="HTML"
     )
 
@@ -478,9 +509,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # FASTAPI
 # ============================================================
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
-ptb_app.add_handler(CommandHandler("start", cmd_start))
-ptb_app.add_handler(CommandHandler("rut",   cmd_rut))
-ptb_app.add_handler(CommandHandler("aff",   cmd_aff))
+ptb_app.add_handler(CommandHandler("start",  cmd_start))
+ptb_app.add_handler(CommandHandler("rut",    cmd_rut))
+ptb_app.add_handler(CommandHandler("aff",    cmd_aff))
+ptb_app.add_handler(CommandHandler("dm",     cmd_dm))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @asynccontextmanager
