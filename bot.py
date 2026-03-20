@@ -10,8 +10,9 @@ BOT_TOKEN      = os.environ.get("BOT_TOKEN")
 API_URL        = os.environ.get("API_URL", "https://s.allvn.top/api.php")
 WEBHOOK_URL    = os.environ.get("WEBHOOK_URL")
 
-SHOPEE_AFF_ID  = "17350890105"
 SHOPEE_SUB_ID  = "----CR--"
+SHOPEE_AFF_ID  = os.environ.get("SHOPEE_AFF_ID", "17350890105")
+current_aff_id = SHOPEE_AFF_ID  # có thể thay đổi runtime bằng /aff
 
 LAZ_APP_KEY    = os.environ.get("LAZ_APP_KEY",    "105827")
 LAZ_APP_SECRET = os.environ.get("LAZ_APP_SECRET", "r8ZMKhPxu1JZUCwTUBVMJiJnZKjhWeQF")
@@ -35,10 +36,6 @@ SHOPEE_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Bắt TẤT CẢ dạng link Lazada:
-# - s.lazada.vn/bất_kỳ   (s.xxx, l.xxx, ...)
-# - c.lazada.vn/bất_kỳ   (t/c.xxx, ...)
-# - lazada.vn/bất_kỳ     (sản phẩm, campaign, danh mục)
 LAZADA_REGEX = re.compile(
     r'(?:https?://)?'
     r'(?:'
@@ -68,7 +65,7 @@ LAZ_FETCH_HEADERS = {
 # LAZADA API
 # ============================================================
 def laz_sign(api_path: str, params: dict) -> str:
-    sorted_items = sorted(params.items())
+    sorted_items   = sorted(params.items())
     string_to_sign = api_path + "".join(str(k) + str(v) for k, v in sorted_items)
     return hmac.new(
         LAZ_APP_SECRET.encode("utf-8"),
@@ -77,7 +74,7 @@ def laz_sign(api_path: str, params: dict) -> str:
     ).hexdigest().upper()
 
 async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
-    api_path = "/marketing/getlink"
+    api_path  = "/marketing/getlink"
     timestamp = int(time.time() * 1000)
 
     api_params = {
@@ -99,7 +96,7 @@ async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=15, verify=False,
                                      headers={"User-Agent": LAZ_SDK_VER}) as c:
-            r = await c.get(url)
+            r    = await c.get(url)
             data = r.json()
 
         code = str(data.get("code", ""))
@@ -169,14 +166,9 @@ async def laz_follow_url(url: str, referer: str = None) -> dict | None:
         return None
 
 def laz_is_short_domain(url: str) -> bool:
-    """Kiểm tra có phải s.lazada.vn hoặc c.lazada.vn không."""
     return bool(re.match(r'https?://(?:s|c)\.lazada\.', url, re.I))
 
 async def laz_resolve_short_url(url: str) -> str:
-    """
-    Resolve s.lazada.vn / c.lazada.vn → URL thật.
-    Giống hệt PHP resolveShortUrl: follow HTTP redirect + parse JS/HTML body.
-    """
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
 
@@ -187,21 +179,21 @@ async def laz_resolve_short_url(url: str) -> str:
     final_url = result["finalUrl"]
     body      = result["body"]
 
-    # Thử JS redirect lần 1
+    # JS redirect lần 1
     next_url = laz_find_js_redirect(body)
     if next_url and next_url.startswith("http"):
         second = await laz_follow_url(next_url, url)
         if second:
             final_url = second["finalUrl"]
             body      = second["body"]
-            # Thử lần 2
+            # JS redirect lần 2
             next_url2 = laz_find_js_redirect(body)
             if next_url2 and next_url2.startswith("http"):
                 third = await laz_follow_url(next_url2, final_url)
                 if third:
                     final_url = third["finalUrl"]
 
-    # Nếu vẫn còn c.lazada → follow thêm
+    # Vẫn còn c.lazada → follow thêm
     if re.search(r'c\.lazada\.', final_url, re.I):
         extra = await laz_follow_url(final_url, url)
         if extra:
@@ -227,7 +219,7 @@ def laz_clean_url(url: str) -> str:
         if not parsed.netloc:
             return url
         query = parsed.query
-        pos = query.lower().find("&trafficfrom=")
+        pos   = query.lower().find("&trafficfrom=")
         if pos != -1:
             query = query[:pos]
         if query.lower().startswith("trafficfrom="):
@@ -257,17 +249,9 @@ def laz_is_lazada_domain(host: str) -> bool:
     return "lazada." in host.lower()
 
 # ============================================================
-# LAZADA: FLOW CHÍNH
+# LAZADA FLOW CHÍNH
 # ============================================================
 async def laz_get_tracking(raw: str) -> str | None:
-    """
-    Flow đầy đủ cho 1 URL Lazada:
-    1. Thêm https nếu thiếu
-    2. Nếu là s.lazada.vn / c.lazada.vn → resolve short URL
-    3. Nếu không phải domain Lazada → follow xem có ra Lazada không
-    4. Clean tracking params
-    5. Extract product ID → gọi API productId, không có thì gọi url
-    """
     url = raw.strip().rstrip(".,!? ")
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
@@ -275,7 +259,6 @@ async def laz_get_tracking(raw: str) -> str | None:
     host = urlparse(url).netloc.lower()
 
     if laz_is_short_domain(url):
-        # s.lazada.vn hoặc c.lazada.vn → resolve
         resolved = await laz_resolve_short_url(url)
         if laz_is_homepage(resolved):
             logging.warning(f"[Lazada] Resolved to homepage, skip")
@@ -283,7 +266,6 @@ async def laz_get_tracking(raw: str) -> str | None:
         url = resolved
 
     elif not laz_is_lazada_domain(host):
-        # Không phải domain Lazada → thử follow (link từ bên thứ 3)
         result = await laz_follow_url(url)
         if not result:
             return None
@@ -293,12 +275,9 @@ async def laz_get_tracking(raw: str) -> str | None:
             return None
         url = result["finalUrl"]
 
-    # Clean
-    cleaned = laz_clean_url(url)
-    logging.info(f"[Lazada] Cleaned: {cleaned[:80]}")
-
-    # Extract product ID
+    cleaned    = laz_clean_url(url)
     product_id = laz_extract_product_id(cleaned)
+
     if product_id:
         logging.info(f"[Lazada] → productId: {product_id}")
         return await laz_call_getlink("productId", product_id)
@@ -323,15 +302,16 @@ async def shopee_get_final_url(url: str) -> str:
         return url
 
 def shopee_build_aff(real_url: str) -> str:
+    global current_aff_id
     if "an_redir" in real_url and "affiliate_id" in real_url:
-        parsed   = urlparse(real_url)
-        qs       = parse_qs(parsed.query, keep_blank_values=True)
-        qs["affiliate_id"] = [SHOPEE_AFF_ID]
+        parsed = urlparse(real_url)
+        qs     = parse_qs(parsed.query, keep_blank_values=True)
+        qs["affiliate_id"] = [current_aff_id]
         qs["sub_id"]       = [SHOPEE_SUB_ID]
         new_query = urlencode({k: v[0] for k, v in qs.items()})
         return urlunparse(parsed._replace(query=new_query))
     enc = quote(real_url, safe="")
-    return f"https://s.shopee.vn/an_redir?origin_link={enc}&affiliate_id={SHOPEE_AFF_ID}&sub_id={SHOPEE_SUB_ID}"
+    return f"https://s.shopee.vn/an_redir?origin_link={enc}&affiliate_id={current_aff_id}&sub_id={SHOPEE_SUB_ID}"
 
 # ============================================================
 # SHORTEN
@@ -414,12 +394,43 @@ async def send_result(update: Update, text: str):
 # HANDLERS
 # ============================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global current_aff_id
     await update.message.reply_text(
-        "🤖 Bot Rút Gọn Link\n\n"
+        "🤖 <b>Bot Rút Gọn Link</b>\n\n"
         "🛒 Gửi link Shopee → affiliate + rút gọn\n"
         "💙 Gửi link Lazada → affiliate (API chính thức) + rút gọn\n"
-        "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần\n\n"
-        "💡 /rut có thể reply vào tin nhắn bất kỳ!"
+        "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần\n"
+        "🔑 /aff [id] → xem hoặc đổi Shopee Affiliate ID\n\n"
+        f"💡 Affiliate ID hiện tại: <code>{current_aff_id}</code>",
+        parse_mode="HTML"
+    )
+
+async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global current_aff_id
+
+    # Không có argument → hiển thị ID hiện tại
+    if not context.args:
+        await update.message.reply_text(
+            f"🔑 Affiliate ID hiện tại: <code>{current_aff_id}</code>\n\n"
+            f"Để đổi: <code>/aff 17317300048</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    new_id = context.args[0].strip()
+
+    if not re.match(r'^\d+$', new_id):
+        await update.message.reply_text("⚠️ ID không hợp lệ, chỉ nhập số!\nVí dụ: /aff 17317300048")
+        return
+
+    old_id         = current_aff_id
+    current_aff_id = new_id
+
+    await update.message.reply_text(
+        f"✅ Đã đổi Shopee Affiliate ID!\n\n"
+        f"Cũ: <code>{old_id}</code>\n"
+        f"Mới: <code>{current_aff_id}</code>",
+        parse_mode="HTML"
     )
 
 async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -469,6 +480,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 ptb_app.add_handler(CommandHandler("start", cmd_start))
 ptb_app.add_handler(CommandHandler("rut",   cmd_rut))
+ptb_app.add_handler(CommandHandler("aff",   cmd_aff))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @asynccontextmanager
