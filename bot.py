@@ -301,13 +301,3 @@ async def webhook(request: Request):
 @fastapi_app.get("/")
 async def root():
     return {"status": "🤖 Bot đang chạy"}
-```
-
----
-
-**Flow Lazada hoạt động:**
-```
-s.lazada.vn/s.7nmnW
-  → get_lazada_final_url() → lazada.vn/products/abc?spm=...
-  → build_lazada_aff()     → c.lazada.vn/t/c.YParqP?url=https%3A%2F%2Flazada.vn%2F...
-  → shorten()              → s.allvn.top/xxxxx
