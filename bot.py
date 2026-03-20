@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ========== REGEX ==========
 URL_REGEX = re.compile(
-    r'https?://[^\s,<>"\)\]]+|(?<!\w)(?:[a-zA-Z0-9-]+\.)+(?:vn|com|net|org|io|ee|co|me|top|online|pro)/[^\s,<>"\)\]]+',
+    r'https?://[^\s,<>"\)\]]+|(?<!\w)[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,6}/[^\s,<>"\)\]]+',
     re.IGNORECASE
 )
 
@@ -63,25 +63,7 @@ def build_aff_link(real_url: str) -> str:
     return f"https://s.shopee.vn/an_redir?origin_link={enc}&affiliate_id={AFFILIATE_ID}&sub_id={SUB_ID}"
 
 # ========== XỬ LÝ TEXT ==========
-async def process_rut(text: str) -> str:
-    """Thay tất cả URL → rút gọn, giữ nguyên phần còn lại."""
-    result = text
-    matches = URL_REGEX.findall(text)
-    seen = {}
-    for raw in matches:
-        clean = raw.rstrip(".,!? ")
-        if not clean:
-            continue
-        if clean in seen:
-            result = result.replace(raw, seen[clean], 1)
-            continue
-        try:
-            short = await shorten(clean)
-            seen[clean] = short
-            result = result.replace(raw, short, 1)
-        except Exception:
-            pass
-    return result
+async def process_rut
 
 async def process_shopee_aff(text: str) -> str:
     """Shopee: unshorten → thêm affiliate → rút gọn, giữ nguyên định dạng."""
