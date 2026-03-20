@@ -1,10 +1,11 @@
-import os, re, httpx, logging
+import os, re, html, httpx, logging
 from urllib.parse import quote, urlparse, parse_qs, urlencode, urlunparse
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
+# ========== CẤU HÌNH ==========
 BOT_TOKEN    = os.environ.get("BOT_TOKEN")
 API_URL      = os.environ.get("API_URL", "https://s.allvn.top/api.php")
 WEBHOOK_URL  = os.environ.get("WEBHOOK_URL")
@@ -51,22 +52,19 @@ async def shorten(long_url: str) -> str:
         raise ValueError(d.get("error", "Lỗi API"))
 
 def build_aff_link(real_url: str) -> str:
-    # Nếu đã là link affiliate rồi thì không wrap lại
     if "an_redir" in real_url and "affiliate_id" in real_url:
-        # Chỉ thay affiliate_id và sub_id thành của mình
         parsed = urlparse(real_url)
         qs = parse_qs(parsed.query, keep_blank_values=True)
         qs["affiliate_id"] = [AFFILIATE_ID]
         qs["sub_id"] = [SUB_ID]
         new_query = urlencode({k: v[0] for k, v in qs.items()})
         return urlunparse(parsed._replace(query=new_query))
-    
     enc = quote(real_url, safe='')
     return f"https://s.shopee.vn/an_redir?origin_link={enc}&affiliate_id={AFFILIATE_ID}&sub_id={SUB_ID}"
 
 # ========== XỬ LÝ TEXT ==========
 async def process_rut(text: str) -> str:
-    """Thay link tại chỗ, giữ nguyên định dạng xung quanh."""
+    """Thay tất cả URL → rút gọn, giữ nguyên phần còn lại."""
     result = text
     matches = URL_REGEX.findall(text)
     seen = {}
@@ -85,8 +83,8 @@ async def process_rut(text: str) -> str:
             pass
     return result
 
-async def process_curl(text: str) -> str:
-    """Shopee: unshorten → affiliate → rút gọn, giữ nguyên định dạng."""
+async def process_shopee_aff(text: str) -> str:
+    """Shopee: unshorten → thêm affiliate → rút gọn, giữ nguyên định dạng."""
     result = text
     matches = list(dict.fromkeys(SHOPEE_REGEX.findall(text)))
 
@@ -107,73 +105,64 @@ async def process_curl(text: str) -> str:
 
     return result
 
-# ========== COMMAND HANDLERS ==========
+# ========== SEND HELPER ==========
+async def send_result(update: Update, result: str):
+    escaped = html.escape(result)
+    try:
+        await update.message.reply_text(escaped, parse_mode="HTML")
+    except Exception:
+        await update.message.reply_text(result)
+
+# ========== HANDLERS ==========
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Bot Rút Gọn Link\n\n"
+        "• Gửi link/đoạn văn có link Shopee → tự động thêm affiliate + rút gọn\n"
+        "• /rut [link hoặc đoạn văn] → chỉ rút gọn, không thêm affiliate\n\n"
+        "💡 Với /rut có thể reply vào tin nhắn bất kỳ!"
+    )
+
 async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /rut [link hoặc đoạn văn]
-    Hoặc reply vào tin nhắn có link + gõ /rut
-    """
-    # Lấy nội dung: từ argument hoặc reply
-    if context.args:
-        text = " ".join(context.args)
-    elif update.message.reply_to_message and update.message.reply_to_message.text:
-        text = update.message.reply_to_message.text
-    else:
-        await update.message.reply_text(
-            "Cách dùng:\n"
-            "• `/rut https://link-dai.com`\n"
-            "• Hoặc reply vào tin nhắn chứa link rồi gõ `/rut`",
-            parse_mode="Markdown"
-        )
-        return
+    # Lấy toàn bộ text sau /rut, giữ nguyên newline
+    full_text = update.message.text or ""
+    text = re.sub(r'^/rut\s*', '', full_text, flags=re.IGNORECASE).strip()
+
+    # Nếu không có text sau lệnh → thử lấy từ reply
+    if not text:
+        if update.message.reply_to_message and update.message.reply_to_message.text:
+            text = update.message.reply_to_message.text
+        else:
+            await update.message.reply_text(
+                "Cách dùng:\n"
+                "• /rut https://link-dai.com\n"
+                "• Paste cả đoạn văn sau lệnh /rut\n"
+                "• Hoặc reply vào tin nhắn rồi gõ /rut"
+            )
+            return
 
     if not URL_REGEX.search(text):
         await update.message.reply_text("⚠️ Không tìm thấy link nào.")
         return
 
     result = await process_rut(text)
-    await update.message.reply_text(result, parse_mode=None)
+    await send_result(update, result)
 
-async def cmd_curl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /curl [link shopee hoặc đoạn văn]
-    Hoặc reply vào tin nhắn có link shopee + gõ /curl
-    """
-    if context.args:
-        text = " ".join(context.args)
-    elif update.message.reply_to_message and update.message.reply_to_message.text:
-        text = update.message.reply_to_message.text
-    else:
-        await update.message.reply_text(
-            "Cách dùng:\n"
-            "• `/curl https://shope.ee/abc`\n"
-            "• Hoặc reply vào tin nhắn chứa link Shopee rồi gõ `/curl`",
-            parse_mode="Markdown"
-        )
-        return
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tin nhắn thường (không phải lệnh) → xử lý Shopee affiliate."""
+    text = update.message.text or ""
 
     if not SHOPEE_REGEX.search(text):
-        await update.message.reply_text("⚠️ Không tìm thấy link Shopee nào.")
-        return
+        return  # Không có link Shopee → bỏ qua
 
     await update.message.reply_text("⏳ Đang xử lý...")
-    result = await process_curl(text)
-    await update.message.reply_text(result, parse_mode=None)
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *Bot Rút Gọn Link*\n\n"
-        "• `/rut [link]` — Rút gọn link thường\n"
-        "• `/curl [link/đoạn văn]` — Shopee: lấy link gốc + thêm affiliate + rút gọn\n\n"
-        "💡 Có thể reply vào bất kỳ tin nhắn nào rồi dùng lệnh!",
-        parse_mode="Markdown"
-    )
+    result = await process_shopee_aff(text)
+    await send_result(update, result)
 
 # ========== SETUP BOT ==========
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 ptb_app.add_handler(CommandHandler("start", cmd_start))
 ptb_app.add_handler(CommandHandler("rut", cmd_rut))
-ptb_app.add_handler(CommandHandler("curl", cmd_curl))
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ========== FASTAPI ==========
 @asynccontextmanager
