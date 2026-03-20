@@ -1,14 +1,13 @@
 import os, re, httpx, logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# ==================== CẤU HÌNH ====================
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")          # Set trong Render Environment
-API_URL    = os.environ.get("API_URL", "https://s.allvn.top/api.php")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")       # https://ten-app.onrender.com/webhook
-PORT       = int(os.environ.get("PORT", 8000))
-# ===================================================
+BOT_TOKEN   = os.environ.get("BOT_TOKEN")
+API_URL     = os.environ.get("API_URL", "https://s.allvn.top/api.php")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+PORT        = int(os.environ.get("PORT", 8000))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -17,7 +16,6 @@ URL_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Khởi tạo app Telegram
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 
 async def shorten(long_url: str) -> str:
@@ -49,19 +47,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# ==================== FASTAPI ====================
-fastapi_app = FastAPI()
-
-@fastapi_app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     await ptb_app.initialize()
     await ptb_app.bot.set_webhook(WEBHOOK_URL)
     await ptb_app.start()
-    print(f"✅ Webhook đã đăng ký: {WEBHOOK_URL}")
-
-@fastapi_app.on_event("shutdown")
-async def shutdown():
+    print(f"✅ Webhook: {WEBHOOK_URL}")
+    yield
     await ptb_app.stop()
+
+fastapi_app = FastAPI(lifespan=lifespan)
 
 @fastapi_app.post("/webhook")
 async def webhook(request: Request):
@@ -73,16 +68,3 @@ async def webhook(request: Request):
 @fastapi_app.get("/")
 async def root():
     return {"status": "Bot đang chạy 🤖"}
-
-# ==================== CHẠY ====================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=PORT)
-```
-
-**`requirements.txt`**
-```
-python-telegram-bot==21.6
-fastapi==0.111.0
-uvicorn==0.30.1
-httpx==0.27.0
