@@ -10,11 +10,9 @@ BOT_TOKEN      = os.environ.get("BOT_TOKEN")
 API_URL        = os.environ.get("API_URL", "https://s.allvn.top/api.php")
 WEBHOOK_URL    = os.environ.get("WEBHOOK_URL")
 
-# Shopee
 SHOPEE_AFF_ID  = "17350890105"
 SHOPEE_SUB_ID  = "----CR--"
 
-# Lazada Official API
 LAZ_APP_KEY    = os.environ.get("LAZ_APP_KEY",    "105827")
 LAZ_APP_SECRET = os.environ.get("LAZ_APP_SECRET", "r8ZMKhPxu1JZUCwTUBVMJiJnZKjhWeQF")
 LAZ_USER_TOKEN = os.environ.get("LAZ_USER_TOKEN", "f879c4163b0f4c5a90c1567fcffac91e")
@@ -37,15 +35,20 @@ SHOPEE_REGEX = re.compile(
     re.IGNORECASE
 )
 
+# Bắt TẤT CẢ dạng link Lazada:
+# - s.lazada.vn/bất_kỳ   (s.xxx, l.xxx, ...)
+# - c.lazada.vn/bất_kỳ   (t/c.xxx, ...)
+# - lazada.vn/bất_kỳ     (sản phẩm, campaign, danh mục)
 LAZADA_REGEX = re.compile(
     r'(?:https?://)?'
-    r'(?:s\.lazada\.vn/s\.[^\s\n\r,<>"]+|'
-    r'c\.lazada\.vn/t/c\.[^\s\n\r,<>"]+|'
-    r'(?:www\.)?lazada\.vn/[^\s\n\r,<>"]+)',
+    r'(?:'
+        r'(?:s|c)\.lazada\.(?:vn|sg|co\.th|com\.my|co\.id|com\.ph)/[^\s\n\r,<>"?]*(?:\?[^\s\n\r,<>"]*)?'
+        r'|'
+        r'(?:www\.)?lazada\.(?:vn|sg|co\.th|com\.my|co\.id|com\.ph)/[^\s\n\r,<>"]*'
+    r')',
     re.IGNORECASE
 )
 
-# Tracking params cần xóa (theo PHP gốc)
 LAZ_TRACKING_PARAMS = {
     'trafficfrom','laz_trackid','mkttid','exlaz','spm','scm','from',
     'clicktrackinfo','search','mp','c','abbucket','aff_trace_key',
@@ -55,19 +58,18 @@ LAZ_TRACKING_PARAMS = {
 
 LAZ_FETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
-    "Upgrade-Insecure-Requests": "1",
 }
 
 # ============================================================
-# LAZADA: SIGN + CALL API
+# LAZADA API
 # ============================================================
 def laz_sign(api_path: str, params: dict) -> str:
     sorted_items = sorted(params.items())
-    string_to_sign = api_path + "".join(k + str(v) for k, v in sorted_items)
+    string_to_sign = api_path + "".join(str(k) + str(v) for k, v in sorted_items)
     return hmac.new(
         LAZ_APP_SECRET.encode("utf-8"),
         string_to_sign.encode("utf-8"),
@@ -75,11 +77,6 @@ def laz_sign(api_path: str, params: dict) -> str:
     ).hexdigest().upper()
 
 async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
-    """
-    Gọi Lazada /marketing/getlink.
-    input_type: 'productId' | 'url'
-    Trả về tracking link hoặc None.
-    """
     api_path = "/marketing/getlink"
     timestamp = int(time.time() * 1000)
 
@@ -123,7 +120,7 @@ async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
                         or item.get("mmPromotionLink")
                         or item.get("dmPromotionLink") or "")
                 if link:
-                    logging.info(f"[LazAPI] tracking link: {link[:80]}")
+                    logging.info(f"[LazAPI] OK: {link[:80]}")
                     return link
 
         return (result_data.get("trackingLink")
@@ -136,7 +133,7 @@ async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
         return None
 
 # ============================================================
-# LAZADA: RESOLVE SHORT URL (giống PHP resolveShortUrl)
+# LAZADA RESOLVE SHORT URL
 # ============================================================
 def laz_find_js_redirect(body: str) -> str | None:
     patterns = [
@@ -152,25 +149,18 @@ def laz_find_js_redirect(body: str) -> str | None:
     for pat in patterns:
         m = re.search(pat, body, re.I)
         if m:
-            val = m.group(1)
-            val = val.replace("&amp;", "&").replace("&#39;", "'")
-            try:
-                from urllib.parse import unquote
-                val = unquote(val)
-            except Exception:
-                pass
+            val = m.group(1).replace("&amp;", "&").replace("&#39;", "'")
             return val
     return None
 
 async def laz_follow_url(url: str, referer: str = None) -> dict | None:
-    """Follow URL, trả về {finalUrl, body}. Giống PHP followUrl."""
     headers = dict(LAZ_FETCH_HEADERS)
     if referer:
         headers["Referer"] = referer
     try:
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=20, verify=False,
-            headers=headers
+            follow_redirects=True, timeout=20,
+            verify=False, headers=headers
         ) as c:
             r = await c.get(url)
             return {"finalUrl": str(r.url), "body": r.text}
@@ -178,10 +168,14 @@ async def laz_follow_url(url: str, referer: str = None) -> dict | None:
         logging.error(f"[LazFollow] {e}")
         return None
 
+def laz_is_short_domain(url: str) -> bool:
+    """Kiểm tra có phải s.lazada.vn hoặc c.lazada.vn không."""
+    return bool(re.match(r'https?://(?:s|c)\.lazada\.', url, re.I))
+
 async def laz_resolve_short_url(url: str) -> str:
     """
-    Giải link s.lazada.vn / c.lazada.vn → URL thật.
-    Logic giống hệt PHP resolveShortUrl.
+    Resolve s.lazada.vn / c.lazada.vn → URL thật.
+    Giống hệt PHP resolveShortUrl: follow HTTP redirect + parse JS/HTML body.
     """
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
@@ -191,7 +185,7 @@ async def laz_resolve_short_url(url: str) -> str:
         return url
 
     final_url = result["finalUrl"]
-    body = result["body"]
+    body      = result["body"]
 
     # Thử JS redirect lần 1
     next_url = laz_find_js_redirect(body)
@@ -199,7 +193,7 @@ async def laz_resolve_short_url(url: str) -> str:
         second = await laz_follow_url(next_url, url)
         if second:
             final_url = second["finalUrl"]
-            body = second["body"]
+            body      = second["body"]
             # Thử lần 2
             next_url2 = laz_find_js_redirect(body)
             if next_url2 and next_url2.startswith("http"):
@@ -207,7 +201,7 @@ async def laz_resolve_short_url(url: str) -> str:
                 if third:
                     final_url = third["finalUrl"]
 
-    # Nếu vẫn là c.lazada.vn → follow thêm lần nữa
+    # Nếu vẫn còn c.lazada → follow thêm
     if re.search(r'c\.lazada\.', final_url, re.I):
         extra = await laz_follow_url(final_url, url)
         if extra:
@@ -215,7 +209,6 @@ async def laz_resolve_short_url(url: str) -> str:
             if not re.search(r'c\.lazada\.', new_final, re.I):
                 final_url = new_final
             else:
-                # Thử parse JS
                 next_js = laz_find_js_redirect(extra["body"])
                 if next_js and next_js.startswith("http"):
                     last = await laz_follow_url(next_js, final_url)
@@ -226,109 +219,92 @@ async def laz_resolve_short_url(url: str) -> str:
     return final_url
 
 # ============================================================
-# LAZADA: CLEAN + EXTRACT + ANALYZE (giống PHP analyzeInput)
+# LAZADA CLEAN + EXTRACT
 # ============================================================
 def laz_clean_url(url: str) -> str:
-    """Xóa tracking params, giống PHP cleanTrackingParams."""
     try:
         parsed = urlparse(url)
         if not parsed.netloc:
             return url
-
         query = parsed.query
-
-        # Cắt &trafficFrom= trở đi
         pos = query.lower().find("&trafficfrom=")
         if pos != -1:
             query = query[:pos]
         if query.lower().startswith("trafficfrom="):
             query = ""
-
-        params = parse_qs(query, keep_blank_values=True)
+        params  = parse_qs(query, keep_blank_values=True)
         cleaned = {k: v[0] for k, v in params.items()
                    if k.lower() not in LAZ_TRACKING_PARAMS}
         new_query = urlencode(cleaned) if cleaned else ""
-
         return urlunparse(parsed._replace(query=new_query, fragment=""))
     except Exception:
         return url
 
 def laz_is_homepage(url: str) -> bool:
     parsed = urlparse(url)
-    path = parsed.path.strip("/")
-    if not path:
-        return True
-    if re.match(r'^(vn|sg|th|my|id|ph)$', path, re.I):
-        return True
-    return False
+    path   = parsed.path.strip("/")
+    return not path or bool(re.match(r'^(vn|sg|th|my|id|ph)$', path, re.I))
 
 def laz_extract_product_id(url: str) -> str | None:
-    patterns = [
-        r'-i(\d+)(?:-s|\.|$|\?)',
-        r'/i(\d+)(?:-|\.|$|\?)',
-        r'itemId=(\d+)',
-        r'product/(\d+)',
-    ]
-    for pat in patterns:
+    for pat in (r'-i(\d+)(?:-s|\.|$|\?)', r'/i(\d+)(?:-|\.|$|\?)',
+                r'itemId=(\d+)', r'product/(\d+)'):
         m = re.search(pat, url)
         if m:
             return m.group(1)
     return None
 
 def laz_is_lazada_domain(host: str) -> bool:
-    host = host.lower()
-    return "lazada." in host
+    return "lazada." in host.lower()
 
+# ============================================================
+# LAZADA: FLOW CHÍNH
+# ============================================================
 async def laz_get_tracking(raw: str) -> str | None:
     """
-    Flow đầy đủ cho 1 URL Lazada (giống PHP analyzeInput + getTrackingLink):
-    1. Nếu là short link → resolve
-    2. Nếu không phải domain Lazada → follow xem có ra Lazada không
-    3. Clean tracking params
-    4. Extract product ID → gọi API productId, không có thì gọi url
-    5. Trả về tracking link
+    Flow đầy đủ cho 1 URL Lazada:
+    1. Thêm https nếu thiếu
+    2. Nếu là s.lazada.vn / c.lazada.vn → resolve short URL
+    3. Nếu không phải domain Lazada → follow xem có ra Lazada không
+    4. Clean tracking params
+    5. Extract product ID → gọi API productId, không có thì gọi url
     """
     url = raw.strip().rstrip(".,!? ")
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
 
-    original_host = urlparse(url).netloc.lower()
+    host = urlparse(url).netloc.lower()
 
-    # Bước 1: Xử lý short link hoặc domain không phải Lazada
-    if not laz_is_lazada_domain(original_host):
-        # Follow xem có ra Lazada không (link rút gọn từ bên thứ 3)
+    if laz_is_short_domain(url):
+        # s.lazada.vn hoặc c.lazada.vn → resolve
+        resolved = await laz_resolve_short_url(url)
+        if laz_is_homepage(resolved):
+            logging.warning(f"[Lazada] Resolved to homepage, skip")
+            return None
+        url = resolved
+
+    elif not laz_is_lazada_domain(host):
+        # Không phải domain Lazada → thử follow (link từ bên thứ 3)
         result = await laz_follow_url(url)
         if not result:
             return None
         final_host = urlparse(result["finalUrl"]).netloc.lower()
         if not laz_is_lazada_domain(final_host):
-            logging.warning(f"[Lazada] Không phải domain Lazada: {result['finalUrl'][:60]}")
+            logging.warning(f"[Lazada] Không ra domain Lazada: {result['finalUrl'][:60]}")
             return None
         url = result["finalUrl"]
 
-    elif re.match(r'https?://(?:s|c)\.lazada\.vn/', url, re.I):
-        # Short link chính thức của Lazada
-        resolved = await laz_resolve_short_url(url)
-        if laz_is_homepage(resolved):
-            logging.warning(f"[Lazada] Resolved to homepage")
-            return None
-        url = resolved
-
-    # Bước 2: Clean
+    # Clean
     cleaned = laz_clean_url(url)
     logging.info(f"[Lazada] Cleaned: {cleaned[:80]}")
 
-    # Bước 3: Extract product ID
+    # Extract product ID
     product_id = laz_extract_product_id(cleaned)
-
     if product_id:
         logging.info(f"[Lazada] → productId: {product_id}")
-        tracking = await laz_call_getlink("productId", product_id)
+        return await laz_call_getlink("productId", product_id)
     else:
         logging.info(f"[Lazada] → url: {cleaned[:80]}")
-        tracking = await laz_call_getlink("url", cleaned)
-
-    return tracking
+        return await laz_call_getlink("url", cleaned)
 
 # ============================================================
 # SHOPEE
@@ -348,8 +324,8 @@ async def shopee_get_final_url(url: str) -> str:
 
 def shopee_build_aff(real_url: str) -> str:
     if "an_redir" in real_url and "affiliate_id" in real_url:
-        parsed = urlparse(real_url)
-        qs = parse_qs(parsed.query, keep_blank_values=True)
+        parsed   = urlparse(real_url)
+        qs       = parse_qs(parsed.query, keep_blank_values=True)
         qs["affiliate_id"] = [SHOPEE_AFF_ID]
         qs["sub_id"]       = [SHOPEE_SUB_ID]
         new_query = urlencode({k: v[0] for k, v in qs.items()})
@@ -374,7 +350,6 @@ async def shorten(long_url: str) -> str:
 # PROCESS TEXT
 # ============================================================
 async def process_rut(text: str) -> str:
-    """Rút gọn tất cả URL, giữ nguyên định dạng."""
     result = text
     seen   = {}
     for raw in URL_REGEX.findall(text):
@@ -403,7 +378,7 @@ async def process_shopee(text: str) -> str:
         real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
         if re.search(r'shopee\.vn|shope\.ee', real_url, re.I):
             try:
-                short = await shorten(shopee_build_aff(real_url))
+                short  = await shorten(shopee_build_aff(real_url))
                 result = result.replace(raw, short, 1)
             except Exception:
                 pass
@@ -423,7 +398,7 @@ async def process_lazada(text: str) -> str:
             except Exception as e:
                 logging.error(f"[Lazada] Lỗi rút gọn: {e}")
         else:
-            logging.warning(f"[Lazada] Bỏ qua (không lấy được tracking): {clean[:60]}")
+            logging.warning(f"[Lazada] Bỏ qua: {clean[:60]}")
     return result
 
 # ============================================================
@@ -489,7 +464,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_result(update, result)
 
 # ============================================================
-# FASTAPI + WEBHOOK
+# FASTAPI
 # ============================================================
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 ptb_app.add_handler(CommandHandler("start", cmd_start))
