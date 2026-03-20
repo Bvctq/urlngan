@@ -30,21 +30,138 @@ SHOPEE_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Link rút gọn Lazada (cần unshorten trước)
+# Link rút gọn Lazada — cần unshorten qua JS parse
 LAZADA_SHORT_REGEX = re.compile(
-    r'(?:https?://)?(?:s\.lazada\.vn/s\.[^\s\n\r,<>"?]+|c\.lazada\.vn/t/c\.[^\s\n\r,<>"?]+)(?:\?[^\s\n\r,<>"]*)?',
+    r'(?:https?://)?'
+    r'(?:s\.lazada\.vn/s\.[^\s\n\r,<>"]+|c\.lazada\.vn/t/c\.[^\s\n\r,<>"]+)',
     re.IGNORECASE
 )
 
-# Link sản phẩm Lazada trực tiếp (chỉ cần encode + thêm aff)
+# Link sản phẩm Lazada trực tiếp — encode + aff luôn
 LAZADA_DIRECT_REGEX = re.compile(
-    r'(?:https?://)?(?:www\.)?lazada\.vn/(?:products/[^\s\n\r,<>"]+|i\d+-s\d+[^\s\n\r,<>"]*)',
+    r'(?:https?://)?(?:www\.)?lazada\.vn/'
+    r'(?:products/[^\s\n\r,<>"]+|i\d+-s\d+[^\s\n\r,<>"]*)',
     re.IGNORECASE
 )
 
-# ========== HELPERS ==========
+# ========== LAZADA UNSHORTEN (parse HTML + JS) ==========
+LAZADA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/16.0 Mobile/15E148 Safari/604.1"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+
+def extract_url_from_html(body: str, base_url: str) -> str | None:
+    """Tìm URL redirect trong HTML/JS body."""
+
+    # 1. window.location.href = "..."
+    m = re.search(r'window\.location(?:\.href)?\s*=\s*["\']([^"\']{10,})["\']', body)
+    if m:
+        return m.group(1)
+
+    # 2. window.location.replace("...")
+    m = re.search(r'window\.location\.replace\s*\(\s*["\']([^"\']{10,})["\']', body)
+    if m:
+        return m.group(1)
+
+    # 3. location.href = "..."
+    m = re.search(r'location\.href\s*=\s*["\']([^"\']{10,})["\']', body)
+    if m:
+        return m.group(1)
+
+    # 4. meta refresh
+    m = re.search(
+        r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\'][^"\']*url=([^"\'>\s]+)',
+        body, re.I
+    )
+    if m:
+        return m.group(1)
+
+    # 5. data-url attribute
+    m = re.search(r'data-url=["\']([^"\']{10,})["\']', body)
+    if m:
+        return m.group(1)
+
+    # 6. <a href> duy nhất trỏ về lazada.vn (trang đích)
+    m = re.search(r'href=["\']([^"\']*lazada\.vn[^"\']*)["\']', body)
+    if m:
+        return m.group(1)
+
+    return None
+
+async def unshorten_lazada(url: str) -> str:
+    """
+    Lazada dùng JS redirect → phải parse HTML body.
+    Trả về URL đích cuối cùng.
+    """
+    if not re.match(r'https?://', url, re.I):
+        url = "https://" + url
+
+    current_url = url
+    visited = set()
+
+    for hop in range(10):
+        if current_url in visited:
+            logging.info(f"[Lazada] Vòng lặp tại {current_url}")
+            break
+        visited.add(current_url)
+        logging.info(f"[Lazada hop {hop+1}] Đang fetch: {current_url[:80]}")
+
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=15,
+                headers=LAZADA_HEADERS
+            ) as c:
+                r = await c.get(current_url)
+
+            # --- Thử HTTP redirect trước ---
+            location = r.headers.get("location", "").strip()
+            if location and r.status_code in (301, 302, 303, 307, 308):
+                if location.startswith("/"):
+                    parsed = urlparse(current_url)
+                    location = f"{parsed.scheme}://{parsed.netloc}{location}"
+                logging.info(f"[Lazada hop {hop+1}] HTTP redirect → {location[:80]}")
+                current_url = location
+
+                # Nếu đã ra khỏi domain rút gọn → dừng
+                if not re.search(r's\.lazada\.vn|c\.lazada\.vn/t/', current_url, re.I):
+                    return current_url
+                continue
+
+            # --- Không có HTTP redirect → parse HTML/JS ---
+            body = r.text
+            next_url = extract_url_from_html(body, current_url)
+
+            if next_url:
+                if next_url.startswith("/"):
+                    parsed = urlparse(current_url)
+                    next_url = f"{parsed.scheme}://{parsed.netloc}{next_url}"
+                logging.info(f"[Lazada hop {hop+1}] JS/HTML redirect → {next_url[:80]}")
+                current_url = next_url
+
+                if not re.search(r's\.lazada\.vn|c\.lazada\.vn/t/', current_url, re.I):
+                    return current_url
+                continue
+
+            # Không tìm thấy redirect nào → đây là trang đích
+            logging.info(f"[Lazada] Kết thúc tại: {current_url[:80]}")
+            break
+
+        except Exception as e:
+            logging.error(f"[Lazada hop {hop+1}] Lỗi: {e}")
+            break
+
+    return current_url
+
+# ========== SHOPEE UNSHORTEN ==========
 async def get_final_url(url: str) -> str:
-    """Unshorten Shopee - follow redirects thông thường."""
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
     try:
@@ -57,57 +174,8 @@ async def get_final_url(url: str) -> str:
     except Exception:
         return url
 
-async def unshorten_lazada(url: str) -> str:
-    """
-    Lazada chặn auto-follow → thủ công theo từng bước redirect.
-    Trả về URL đích cuối cùng (dạng dài).
-    """
-    if not re.match(r'https?://', url, re.I):
-        url = "https://" + url
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
-    }
-
-    current_url = url
-    max_hops = 10
-
-    for i in range(max_hops):
-        try:
-            async with httpx.AsyncClient(
-                follow_redirects=False,
-                timeout=15,
-                headers=headers
-            ) as c:
-                r = await c.get(current_url)
-                location = r.headers.get("location", "").strip()
-
-                logging.info(f"[Lazada hop {i+1}] {current_url} → status={r.status_code} location={location[:80] if location else 'none'}")
-
-                if r.status_code in (301, 302, 303, 307, 308) and location:
-                    # Nếu location là relative URL thì ghép lại
-                    if location.startswith("/"):
-                        parsed = urlparse(current_url)
-                        location = f"{parsed.scheme}://{parsed.netloc}{location}"
-                    current_url = location
-
-                    # Nếu đã ra khỏi lazada short domain → đây là URL đích
-                    if not re.search(r's\.lazada\.vn|c\.lazada\.vn/t/', current_url, re.I):
-                        # Follow thêm 1 lần nữa nếu vẫn là lazada.vn thông thường
-                        return current_url
-                else:
-                    # Không còn redirect → đây là URL cuối
-                    return current_url
-        except Exception as e:
-            logging.error(f"[Lazada unshorten] Lỗi hop {i+1}: {e}")
-            break
-
-    return current_url
-
+# ========== SHORTEN + AFF ==========
 async def shorten(long_url: str) -> str:
-    """Gọi api.php để rút gọn."""
     if not re.match(r'https?://', long_url, re.I):
         long_url = "https://" + long_url
     async with httpx.AsyncClient(timeout=10) as c:
@@ -129,17 +197,14 @@ def build_shopee_aff(real_url: str) -> str:
     return f"https://s.shopee.vn/an_redir?origin_link={enc}&affiliate_id={AFFILIATE_ID}&sub_id={SUB_ID}"
 
 def build_lazada_aff(real_url: str) -> str:
-    """Encode URL rồi thêm prefix affiliate Lazada."""
     enc = quote(real_url, safe='')
     return f"{LAZADA_AFF}{enc}"
 
 # ========== XỬ LÝ TEXT ==========
 async def process_rut(text: str) -> str:
-    """Rút gọn tất cả URL, giữ nguyên định dạng."""
     result = text
     matches = URL_REGEX.findall(text)
     seen = {}
-
     for raw in matches:
         clean = raw.rstrip(".,!? ")
         if not clean:
@@ -154,14 +219,11 @@ async def process_rut(text: str) -> str:
             result = result.replace(raw, short, 1)
         except Exception:
             pass
-
     return result
 
 async def process_shopee_aff(text: str) -> str:
-    """Shopee: unshorten → affiliate → rút gọn."""
     result = text
     matches = list(dict.fromkeys(SHOPEE_REGEX.findall(text)))
-
     for raw in matches:
         clean = raw.rstrip(".,!? ")
         url = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
@@ -174,57 +236,45 @@ async def process_shopee_aff(text: str) -> str:
                 result = result.replace(raw, short, 1)
             except Exception:
                 pass
-
     return result
 
 async def process_lazada_short(text: str) -> str:
-    """
-    Lazada rút gọn (s.lazada.vn / c.lazada.vn/t/):
-    unshorten → lấy URL đích dài → encode → thêm aff → rút gọn
-    """
+    """Link rút gọn Lazada → unshorten (parse JS) → encode → aff → rút gọn."""
     result = text
     matches = list(dict.fromkeys(LAZADA_SHORT_REGEX.findall(text)))
-
     for raw in matches:
         clean = raw.rstrip(".,!? ")
         url = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
 
-        logging.info(f"[Lazada short] Đang xử lý: {url}")
         real_url = await unshorten_lazada(url)
-        logging.info(f"[Lazada short] URL đích: {real_url[:100]}")
+        logging.info(f"[Lazada short] {url} → {real_url[:80]}")
 
-        if re.search(r'lazada\.vn', real_url, re.I):
+        # Chỉ xử lý nếu đã thoát khỏi domain rút gọn
+        if re.search(r'lazada\.vn', real_url, re.I) and not re.search(r's\.lazada\.vn|c\.lazada\.vn/t/', real_url, re.I):
             aff_link = build_lazada_aff(real_url)
             try:
                 short = await shorten(aff_link)
                 result = result.replace(raw, short, 1)
-                logging.info(f"[Lazada short] Kết quả: {short}")
             except Exception as e:
                 logging.error(f"[Lazada short] Lỗi rút gọn: {e}")
+        else:
+            logging.warning(f"[Lazada short] Không lấy được URL đích, bỏ qua: {real_url[:80]}")
 
     return result
 
 async def process_lazada_direct(text: str) -> str:
-    """
-    Lazada link trực tiếp (lazada.vn/products/ hoặc lazada.vn/iXXX):
-    encode → thêm aff → rút gọn (không cần unshorten)
-    """
+    """Link sản phẩm Lazada trực tiếp → encode + aff → rút gọn."""
     result = text
     matches = list(dict.fromkeys(LAZADA_DIRECT_REGEX.findall(text)))
-
     for raw in matches:
         clean = raw.rstrip(".,!? ")
         url = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
-
-        logging.info(f"[Lazada direct] Đang xử lý: {url}")
         aff_link = build_lazada_aff(url)
         try:
             short = await shorten(aff_link)
             result = result.replace(raw, short, 1)
-            logging.info(f"[Lazada direct] Kết quả: {short}")
         except Exception as e:
-            logging.error(f"[Lazada direct] Lỗi rút gọn: {e}")
-
+            logging.error(f"[Lazada direct] Lỗi: {e}")
     return result
 
 # ========== SEND HELPER ==========
@@ -235,20 +285,19 @@ async def send_result(update: Update, result: str):
     except Exception:
         await update.message.reply_text(result)
 
-# ========== COMMAND HANDLERS ==========
+# ========== HANDLERS ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Bot Rút Gọn Link\n\n"
-        "🛒 Gửi link Shopee → tự thêm affiliate + rút gọn\n"
-        "💙 Gửi link Lazada (rút gọn hoặc trực tiếp) → tự thêm affiliate + rút gọn\n"
-        "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần, không thêm affiliate\n\n"
+        "🛒 Link Shopee → tự thêm affiliate + rút gọn\n"
+        "💙 Link Lazada (rút gọn/trực tiếp) → tự thêm affiliate + rút gọn\n"
+        "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần\n\n"
         "💡 /rut có thể reply vào tin nhắn bất kỳ!"
     )
 
 async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = update.message.text or ""
     text = re.sub(r'^/rut\s*', '', full_text, flags=re.IGNORECASE).strip()
-
     if not text:
         if update.message.reply_to_message and update.message.reply_to_message.text:
             text = update.message.reply_to_message.text
@@ -260,27 +309,22 @@ async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Hoặc reply vào tin nhắn rồi gõ /rut"
             )
             return
-
     if not URL_REGEX.search(text):
         await update.message.reply_text("⚠️ Không tìm thấy link nào.")
         return
-
     result = await process_rut(text)
     await send_result(update, result)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tin nhắn thường → tự nhận diện loại link và xử lý."""
     text = update.message.text or ""
-
-    has_shopee      = bool(SHOPEE_REGEX.search(text))
+    has_shopee        = bool(SHOPEE_REGEX.search(text))
     has_lazada_short  = bool(LAZADA_SHORT_REGEX.search(text))
     has_lazada_direct = bool(LAZADA_DIRECT_REGEX.search(text))
 
     if not any([has_shopee, has_lazada_short, has_lazada_direct]):
-        return  # Không có link liên quan → bỏ qua
+        return
 
     await update.message.reply_text("⏳ Đang xử lý...")
-
     result = text
     if has_shopee:
         result = await process_shopee_aff(result)
@@ -288,16 +332,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await process_lazada_short(result)
     if has_lazada_direct:
         result = await process_lazada_direct(result)
-
     await send_result(update, result)
 
-# ========== SETUP BOT ==========
+# ========== SETUP ==========
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 ptb_app.add_handler(CommandHandler("start", cmd_start))
 ptb_app.add_handler(CommandHandler("rut", cmd_rut))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# ========== FASTAPI ==========
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await ptb_app.initialize()
