@@ -73,32 +73,52 @@ LAZ_FETCH_HEADERS = {
 # TEXT CLEANER
 # ============================================================
 def clean_text(text: str) -> str:
-    """
-    1. Thay ◼️ • ► → -
-    2. Thay 'đơn từ' → 'max'  (phải trước khi thay đơn/từ riêng lẻ)
-    3. Thay 'đơn'   → '/'
-    4. Thay 'từ'    → '/'     (chỉ khi đứng độc lập, có khoảng trắng xung quanh)
-    5. Thay 'tối đa' → 'max'
-    """
-    # 1. Thay ký hiệu đầu dòng
+    # 1. Thay ký hiệu đầu dòng → -
     text = re.sub(r'◼️|◼', '-', text)
     text = re.sub(r'•', '-', text)
     text = re.sub(r'►', '-', text)
 
-    # 2. Thay 'đơn từ' → 'max' (cụm từ, trước)
-    text = re.sub(r'đơn\s+từ', 'max', text, flags=re.IGNORECASE)
+    # 2. Thay 'đơn từ' → '/' (xóa khoảng trắng 2 bên, không có space)
+    # "30K đơn từ 99K" → "30K/99K"
+    text = re.sub(r'\s+đơn\s+từ\s+', '/', text, flags=re.IGNORECASE)
 
-    # 3. Thay 'đơn' đứng độc lập → '/'
-    # Có khoảng trắng/đầu dòng trước, theo sau là khoảng trắng hoặc số
-    text = re.sub(r'(?<!\w)đơn(?!\w)', '/', text, flags=re.IGNORECASE)
+    # 3. Thay 'đơn' đứng độc lập → '/' (xóa khoảng trắng 2 bên)
+    # "99K đơn 400K" → "99K/400K"
+    text = re.sub(r'\s+đơn\s+', '/', text, flags=re.IGNORECASE)
 
-    # 4. Thay 'từ' đứng độc lập → '/'
-    text = re.sub(r'(?<!\w)từ(?!\w)', '/', text, flags=re.IGNORECASE)
-
-    # 5. Thay 'tối đa' → 'max'
+    # 4. Thay 'tối đa' → 'max'
     text = re.sub(r'tối\s+đa', 'max', text, flags=re.IGNORECASE)
 
     return text
+
+
+def format_codes(text: str) -> str:
+    """
+    Bọc các mã code (3+ chữ in hoa liên tiếp, có thể kèm số)
+    bằng <code> để tap-to-copy trong Telegram.
+    Ví dụ: AFFFMN → <code>AFFFMN</code>
+            ST1UF8X9T0CZHY15 → <code>ST1UF8X9T0CZHY15</code>
+    """
+    # Pattern: ít nhất 3 chữ hoa liên tiếp ở đầu, theo sau là chữ hoa/số
+    # Không bọc nếu nằm trong URL (có http hoặc // trước)
+    def replacer(m):
+        # Kiểm tra không phải trong URL
+        start = m.start()
+        before = text[max(0, start-10):start]
+        if re.search(r'https?://|//', before):
+            return m.group(0)
+        return f'<code>{m.group(0)}</code>'
+
+    return re.sub(r'(?<!\w)[A-Z]{3}[A-Z0-9]*(?!\w)', replacer, text)
+
+
+async def send_result(update: Update, text: str):
+    try:
+        escaped    = html.escape(text)
+        formatted  = format_codes(escaped)
+        await update.message.reply_text(formatted, parse_mode="HTML")
+    except Exception:
+        await update.message.reply_text(text)
 
 # ============================================================
 # LAZADA API
