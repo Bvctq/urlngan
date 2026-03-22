@@ -30,7 +30,6 @@ URL_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Domain Shopee chính thức
 SHOPEE_DIRECT_REGEX = re.compile(
     r'(?:https?://)?(?:[a-z0-9.-]*)'
     r'(?:shopee\.vn|shope\.ee|app\.shopeepay\.vn|s\.5anm\.net|shp\.ee)'
@@ -38,8 +37,6 @@ SHOPEE_DIRECT_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Domain rút gọn không rõ đích (có thể là Shopee hoặc Lazada)
-# → cần follow để biết đích rồi mới xử lý
 SHORT_UNKNOWN_REGEX = re.compile(
     r'(?:https?://)?'
     r'(?:sandeal\.co|hoisansale\.pro|nghien\.co|thanhsansale\.online|bit\.ly|tinyurl\.com)'
@@ -47,7 +44,6 @@ SHORT_UNKNOWN_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Domain Lazada chính thức
 LAZADA_REGEX = re.compile(
     r'(?:https?://)?'
     r'(?:'
@@ -72,6 +68,37 @@ LAZ_FETCH_HEADERS = {
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
+
+# ============================================================
+# TEXT CLEANER
+# ============================================================
+def clean_text(text: str) -> str:
+    """
+    1. Thay ◼️ • ► → -
+    2. Thay 'đơn từ' → 'max'  (phải trước khi thay đơn/từ riêng lẻ)
+    3. Thay 'đơn'   → '/'
+    4. Thay 'từ'    → '/'     (chỉ khi đứng độc lập, có khoảng trắng xung quanh)
+    5. Thay 'tối đa' → 'max'
+    """
+    # 1. Thay ký hiệu đầu dòng
+    text = re.sub(r'◼️|◼', '-', text)
+    text = re.sub(r'•', '-', text)
+    text = re.sub(r'►', '-', text)
+
+    # 2. Thay 'đơn từ' → 'max' (cụm từ, trước)
+    text = re.sub(r'đơn\s+từ', 'max', text, flags=re.IGNORECASE)
+
+    # 3. Thay 'đơn' đứng độc lập → '/'
+    # Có khoảng trắng/đầu dòng trước, theo sau là khoảng trắng hoặc số
+    text = re.sub(r'(?<!\w)đơn(?!\w)', '/', text, flags=re.IGNORECASE)
+
+    # 4. Thay 'từ' đứng độc lập → '/'
+    text = re.sub(r'(?<!\w)từ(?!\w)', '/', text, flags=re.IGNORECASE)
+
+    # 5. Thay 'tối đa' → 'max'
+    text = re.sub(r'tối\s+đa', 'max', text, flags=re.IGNORECASE)
+
+    return text
 
 # ============================================================
 # LAZADA API
@@ -261,13 +288,9 @@ def is_shopee_domain(host: str) -> bool:
     return bool(re.search(r'shopee\.|shope\.ee', host, re.I))
 
 # ============================================================
-# FOLLOW URL KHÔNG RÕ ĐÍCH → phát hiện Shopee hay Lazada
+# FOLLOW URL KHÔNG RÕ ĐÍCH
 # ============================================================
 async def follow_unknown_url(url: str) -> tuple[str, str]:
-    """
-    Follow URL không rõ đích.
-    Trả về (final_url, loại): loại = 'shopee' | 'lazada' | 'unknown'
-    """
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
 
@@ -279,17 +302,16 @@ async def follow_unknown_url(url: str) -> tuple[str, str]:
     final_host = urlparse(final_url).netloc.lower()
 
     if is_shopee_domain(final_host):
-        logging.info(f"[Unknown] {url[:50]} → Shopee: {final_url[:60]}")
+        logging.info(f"[Unknown] → Shopee: {final_url[:60]}")
         return final_url, "shopee"
 
     if laz_is_lazada_domain(final_host):
-        logging.info(f"[Unknown] {url[:50]} → Lazada: {final_url[:60]}")
+        logging.info(f"[Unknown] → Lazada: {final_url[:60]}")
         return final_url, "lazada"
 
-    # Thử parse JS nếu chưa ra đích
     next_url = laz_find_js_redirect(result["body"])
     if next_url and next_url.startswith("http"):
-        second     = await laz_follow_url(next_url, final_url)
+        second = await laz_follow_url(next_url, final_url)
         if second:
             final_url  = second["finalUrl"]
             final_host = urlparse(final_url).netloc.lower()
@@ -400,7 +422,6 @@ async def process_rut(text: str) -> str:
     return result
 
 async def process_shopee_direct(text: str, url: str, raw: str) -> str:
-    """Xử lý 1 URL Shopee đã biết chắc là Shopee."""
     real_url = await shopee_get_final_url(url)
     real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
     if re.search(r'shopee\.vn|shope\.ee', real_url, re.I):
@@ -412,7 +433,6 @@ async def process_shopee_direct(text: str, url: str, raw: str) -> str:
     return text
 
 async def process_lazada_direct(text: str, url: str, raw: str) -> str:
-    """Xử lý 1 URL Lazada đã biết chắc là Lazada."""
     tracking = await laz_get_tracking(url)
     if tracking:
         try:
@@ -425,22 +445,22 @@ async def process_lazada_direct(text: str, url: str, raw: str) -> str:
 async def process_all(text: str) -> str:
     result = text
 
-    # 1. Xử lý Shopee domain chính thức
+    # 1. Shopee domain chính thức
     for raw in list(dict.fromkeys(SHOPEE_DIRECT_REGEX.findall(text))):
-        clean = raw.rstrip(".,!? ")
-        url   = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
+        clean  = raw.rstrip(".,!? ")
+        url    = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
         result = await process_shopee_direct(result, url, raw)
 
-    # 2. Xử lý Lazada domain chính thức
+    # 2. Lazada domain chính thức
     for raw in list(dict.fromkeys(LAZADA_REGEX.findall(text))):
-        clean = raw.rstrip(".,!? ")
+        clean  = raw.rstrip(".,!? ")
         result = await process_lazada_direct(result, clean, raw)
 
-    # 3. Xử lý domain không rõ đích (sandeal.co, hoisansale.pro, ...)
+    # 3. Domain không rõ đích
     for raw in list(dict.fromkeys(SHORT_UNKNOWN_REGEX.findall(text))):
-        clean    = raw.rstrip(".,!? ")
-        url      = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
-        final_url, dest = await follow_unknown_url(url)
+        clean             = raw.rstrip(".,!? ")
+        url               = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
+        final_url, dest   = await follow_unknown_url(url)
 
         if dest == "shopee":
             final_url = final_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
@@ -449,7 +469,6 @@ async def process_all(text: str) -> str:
                 result = result.replace(raw, short, 1)
             except Exception:
                 pass
-
         elif dest == "lazada":
             tracking = await laz_get_tracking(final_url)
             if tracking:
@@ -552,6 +571,8 @@ async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not URL_REGEX.search(text):
         await update.message.reply_text("⚠️ Không tìm thấy link nào.")
         return
+    # /rut cũng áp dụng clean_text
+    text = clean_text(text)
     await send_result(update, await process_rut(text))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -565,6 +586,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("⏳ Đang xử lý...")
+
+    # Clean text TRƯỚC khi xử lý link
+    text   = clean_text(text)
     result = await process_all(text)
     await send_result(update, result)
 
