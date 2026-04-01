@@ -57,7 +57,7 @@ SHOPEE_DIRECT_REGEX = re.compile(
 
 SHORT_UNKNOWN_REGEX = re.compile(
     r'(?:https?://)?'
-    r'(?:sandeal\.co|hoisansale\.pro|nghien\.co|thanhsansale\.online|bit\.ly|tinyurl\.com)'
+    r'(?:sandeal\.co|hoisansale\.pro|nghien\.co|thanhsansale\.online|bit\.ly|tinyurl\.com|s\.salevn\.top|s\.allvn\.top)'
     r'/[^\s\n\r,<>"]*',
     re.IGNORECASE
 )
