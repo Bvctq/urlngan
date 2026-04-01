@@ -2,8 +2,11 @@ import os, re, html, httpx, hmac, hashlib, time, logging
 from urllib.parse import quote, urlparse, parse_qs, urlencode, urlunparse
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, MessageHandler, CommandHandler,
+    CallbackQueryHandler, filters, ContextTypes
+)
 
 # ========== CẤU HÌNH ==========
 BOT_TOKEN       = os.environ.get("BOT_TOKEN")
@@ -21,6 +24,21 @@ LAZ_APP_SECRET = os.environ.get("LAZ_APP_SECRET", "r8ZMKhPxu1JZUCwTUBVMJiJnZKjhW
 LAZ_USER_TOKEN = os.environ.get("LAZ_USER_TOKEN", "f879c4163b0f4c5a90c1567fcffac91e")
 LAZ_BASE_URL   = "https://api.lazada.vn"
 LAZ_SDK_VER    = "lazop-sdk-python-affiliate-1.0"
+
+# ========== DANH SÁCH CẤU HÌNH ==========
+DOMAIN_LIST = [
+    "https://s.allvn.top",
+    "https://s.salevn.top",
+]
+
+AFF_ID_LIST = [
+    "17350890105",
+    "17342140095",
+    "17317300048",
+    "17307340066",
+    "17384020119",
+    "17353410295",
+]
 
 logging.basicConfig(level=logging.INFO)
 
@@ -70,52 +88,85 @@ LAZ_FETCH_HEADERS = {
 }
 
 # ============================================================
+# INLINE KEYBOARD HELPERS
+# ============================================================
+def get_current_domain() -> str:
+    return current_api_url.replace("/api.php", "")
+
+def get_next_domain() -> str:
+    cur = get_current_domain()
+    for d in DOMAIN_LIST:
+        if d != cur:
+            return d
+    return DOMAIN_LIST[0]
+
+def build_main_keyboard() -> InlineKeyboardMarkup:
+    cur_domain  = get_current_domain().replace("https://", "")
+    next_domain = get_next_domain().replace("https://", "")
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"🌐 Domain: {cur_domain}  →  {next_domain}",
+                callback_data="toggle_domain"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"🔑 Affiliate ID: {current_aff_id}",
+                callback_data="show_aff_list"
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_aff_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for aff_id in AFF_ID_LIST:
+        mark = "✅ " if aff_id == current_aff_id else ""
+        rows.append([
+            InlineKeyboardButton(
+                f"{mark}{aff_id}",
+                callback_data=f"set_aff_{aff_id}"
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton("« Quay lại", callback_data="back_main")
+    ])
+    return InlineKeyboardMarkup(rows)
+
+def build_status_text() -> str:
+    cur_domain = get_current_domain()
+    return (
+        "⚙️ <b>Cài đặt Bot</b>\n\n"
+        f"🌐 Domain rút gọn: <code>{cur_domain}</code>\n"
+        f"🔑 Affiliate ID: <code>{current_aff_id}</code>"
+    )
+
+# ============================================================
 # TEXT CLEANER
 # ============================================================
 def clean_text(text: str) -> str:
-    # 1. Thay ký hiệu đầu dòng → -
     text = re.sub(r'◼️|◼', '-', text)
     text = re.sub(r'•', '-', text)
     text = re.sub(r'►', '-', text)
-
-    # 2. Thay 'đơn từ' → '/' (xóa khoảng trắng 2 bên, không có space)
-    # "30K đơn từ 99K" → "30K/99K"
     text = re.sub(r'\s+đơn\s+từ\s+', '/', text, flags=re.IGNORECASE)
-
-    # 3. Thay 'đơn' đứng độc lập → '/' (xóa khoảng trắng 2 bên)
-    # "99K đơn 400K" → "99K/400K"
     text = re.sub(r'\s+đơn\s+', '/', text, flags=re.IGNORECASE)
-
-    # 4. Thay 'tối đa' → 'max'
     text = re.sub(r'tối\s+đa', 'max', text, flags=re.IGNORECASE)
-
     return text
 
-
 def format_codes(text: str) -> str:
-    """
-    Bọc các mã code (3+ chữ in hoa liên tiếp, có thể kèm số)
-    bằng <code> để tap-to-copy trong Telegram.
-    Ví dụ: AFFFMN → <code>AFFFMN</code>
-            ST1UF8X9T0CZHY15 → <code>ST1UF8X9T0CZHY15</code>
-    """
-    # Pattern: ít nhất 3 chữ hoa liên tiếp ở đầu, theo sau là chữ hoa/số
-    # Không bọc nếu nằm trong URL (có http hoặc // trước)
     def replacer(m):
-        # Kiểm tra không phải trong URL
-        start = m.start()
+        start  = m.start()
         before = text[max(0, start-10):start]
         if re.search(r'https?://|//', before):
             return m.group(0)
         return f'<code>{m.group(0)}</code>'
-
     return re.sub(r'(?<!\w)[A-Z]{3}[A-Z0-9]*(?!\w)', replacer, text)
-
 
 async def send_result(update: Update, text: str):
     try:
-        escaped    = html.escape(text)
-        formatted  = format_codes(escaped)
+        escaped   = html.escape(text)
+        formatted = format_codes(escaped)
         await update.message.reply_text(formatted, parse_mode="HTML")
     except Exception:
         await update.message.reply_text(text)
@@ -135,7 +186,6 @@ def laz_sign(api_path: str, params: dict) -> str:
 async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
     api_path  = "/marketing/getlink"
     timestamp = int(time.time() * 1000)
-
     api_params = {
         "userToken":  LAZ_USER_TOKEN,
         "inputType":  input_type,
@@ -149,22 +199,17 @@ async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
     }
     all_params = {**api_params, **sys_params}
     sys_params["sign"] = laz_sign(api_path, all_params)
-
     url = f"{LAZ_BASE_URL}/rest{api_path}?{urlencode(sys_params)}&{urlencode(api_params)}"
-
     try:
         async with httpx.AsyncClient(timeout=15, verify=False,
                                      headers={"User-Agent": LAZ_SDK_VER}) as c:
             r    = await c.get(url)
             data = r.json()
-
         code = str(data.get("code", ""))
         if code not in ("0", ""):
             logging.error(f"[LazAPI] code={code} msg={data.get('message')}")
             return None
-
         result_data = data.get("result", {}).get("data", {})
-
         for list_key in ("urlBatchGetLinkInfoList",
                          "productBatchGetLinkInfoList",
                          "offerBatchGetLinkInfoList"):
@@ -176,14 +221,11 @@ async def laz_call_getlink(input_type: str, input_value: str) -> str | None:
                         or item.get("mmPromotionLink")
                         or item.get("dmPromotionLink") or "")
                 if link:
-                    logging.info(f"[LazAPI] OK: {link[:80]}")
                     return link
-
         return (result_data.get("trackingLink")
                 or result_data.get("regularPromotionLink")
                 or result_data.get("offerPromotionLink")
                 or None)
-
     except Exception as e:
         logging.error(f"[LazAPI] Exception: {e}")
         return None
@@ -214,10 +256,8 @@ async def laz_follow_url(url: str, referer: str = None) -> dict | None:
     if referer:
         headers["Referer"] = referer
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=20,
-            verify=False, headers=headers
-        ) as c:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20,
+                                     verify=False, headers=headers) as c:
             r = await c.get(url)
             return {"finalUrl": str(r.url), "body": r.text}
     except Exception as e:
@@ -230,15 +270,12 @@ def laz_is_short_domain(url: str) -> bool:
 async def laz_resolve_short_url(url: str) -> str:
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
-
     result = await laz_follow_url(url)
     if not result:
         return url
-
     final_url = result["finalUrl"]
     body      = result["body"]
-
-    next_url = laz_find_js_redirect(body)
+    next_url  = laz_find_js_redirect(body)
     if next_url and next_url.startswith("http"):
         second = await laz_follow_url(next_url, url)
         if second:
@@ -249,7 +286,6 @@ async def laz_resolve_short_url(url: str) -> str:
                 third = await laz_follow_url(next_url2, final_url)
                 if third:
                     final_url = third["finalUrl"]
-
     if re.search(r'c\.lazada\.', final_url, re.I):
         extra = await laz_follow_url(final_url, url)
         if extra:
@@ -262,7 +298,6 @@ async def laz_resolve_short_url(url: str) -> str:
                     last = await laz_follow_url(next_js, final_url)
                     if last:
                         final_url = last["finalUrl"]
-
     logging.info(f"[LazResolve] {url[:60]} → {final_url[:80]}")
     return final_url
 
@@ -313,22 +348,15 @@ def is_shopee_domain(host: str) -> bool:
 async def follow_unknown_url(url: str) -> tuple[str, str]:
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
-
     result = await laz_follow_url(url)
     if not result:
         return url, "unknown"
-
     final_url  = result["finalUrl"]
     final_host = urlparse(final_url).netloc.lower()
-
     if is_shopee_domain(final_host):
-        logging.info(f"[Unknown] → Shopee: {final_url[:60]}")
         return final_url, "shopee"
-
     if laz_is_lazada_domain(final_host):
-        logging.info(f"[Unknown] → Lazada: {final_url[:60]}")
         return final_url, "lazada"
-
     next_url = laz_find_js_redirect(result["body"])
     if next_url and next_url.startswith("http"):
         second = await laz_follow_url(next_url, final_url)
@@ -339,7 +367,6 @@ async def follow_unknown_url(url: str) -> tuple[str, str]:
                 return final_url, "shopee"
             if laz_is_lazada_domain(final_host):
                 return final_url, "lazada"
-
     logging.warning(f"[Unknown] Không nhận ra đích: {final_url[:60]}")
     return final_url, "unknown"
 
@@ -350,9 +377,7 @@ async def laz_get_tracking(raw: str) -> str | None:
     url = raw.strip().rstrip(".,!? ")
     if not re.match(r'https?://', url, re.I):
         url = "https://" + url
-
     host = urlparse(url).netloc.lower()
-
     if laz_is_short_domain(url):
         resolved = await laz_resolve_short_url(url)
         if laz_is_homepage(resolved):
@@ -366,15 +391,11 @@ async def laz_get_tracking(raw: str) -> str | None:
         if not laz_is_lazada_domain(final_host):
             return None
         url = result["finalUrl"]
-
     cleaned    = laz_clean_url(url)
     product_id = laz_extract_product_id(cleaned)
-
     if product_id:
-        logging.info(f"[Lazada] → productId: {product_id}")
         return await laz_call_getlink("productId", product_id)
     else:
-        logging.info(f"[Lazada] → url: {cleaned[:80]}")
         return await laz_call_getlink("url", cleaned)
 
 # ============================================================
@@ -434,9 +455,9 @@ async def process_rut(text: str) -> str:
             continue
         url = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
         try:
-            short = await shorten(url)
+            short      = await shorten(url)
             seen[clean] = short
-            result = result.replace(raw, short, 1)
+            result     = result.replace(raw, short, 1)
         except Exception:
             pass
     return result
@@ -464,24 +485,17 @@ async def process_lazada_direct(text: str, url: str, raw: str) -> str:
 
 async def process_all(text: str) -> str:
     result = text
-
-    # 1. Shopee domain chính thức
     for raw in list(dict.fromkeys(SHOPEE_DIRECT_REGEX.findall(text))):
         clean  = raw.rstrip(".,!? ")
         url    = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
         result = await process_shopee_direct(result, url, raw)
-
-    # 2. Lazada domain chính thức
     for raw in list(dict.fromkeys(LAZADA_REGEX.findall(text))):
         clean  = raw.rstrip(".,!? ")
         result = await process_lazada_direct(result, clean, raw)
-
-    # 3. Domain không rõ đích
     for raw in list(dict.fromkeys(SHORT_UNKNOWN_REGEX.findall(text))):
-        clean             = raw.rstrip(".,!? ")
-        url               = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
-        final_url, dest   = await follow_unknown_url(url)
-
+        clean           = raw.rstrip(".,!? ")
+        url             = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
+        final_url, dest = await follow_unknown_url(url)
         if dest == "shopee":
             final_url = final_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
             try:
@@ -497,35 +511,28 @@ async def process_all(text: str) -> str:
                     result = result.replace(raw, short, 1)
                 except Exception:
                     pass
-
     return result
-
-# ============================================================
-# SEND
-# ============================================================
-async def send_result(update: Update, text: str):
-    try:
-        await update.message.reply_text(html.escape(text), parse_mode="HTML")
-    except Exception:
-        await update.message.reply_text(text)
 
 # ============================================================
 # HANDLERS
 # ============================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global current_aff_id, current_api_url
-    current_domain = current_api_url.replace("/api.php", "")
     await update.message.reply_text(
         "🤖 <b>Bot Rút Gọn Link</b>\n\n"
         "🛒 Gửi link Shopee → affiliate + rút gọn\n"
         "💙 Gửi link Lazada → affiliate (API chính thức) + rút gọn\n"
-        "🔀 Domain rút gọn lạ → tự follow, nhận diện Shopee/Lazada\n"
-        "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần\n"
-        "🔑 /aff [id] → xem/đổi Shopee Affiliate ID\n"
-        "🌐 /dm [domain] → xem/đổi domain rút gọn\n\n"
-        f"Affiliate ID: <code>{current_aff_id}</code>\n"
-        f"Domain: <code>{current_domain}</code>",
-        parse_mode="HTML"
+        "🔀 Domain lạ → tự follow, nhận diện Shopee/Lazada\n"
+        "✂️ /rut [link/đoạn văn] → chỉ rút gọn thuần\n\n"
+        "⚙️ Dùng nút bên dưới để cài đặt nhanh:",
+        parse_mode="HTML",
+        reply_markup=build_main_keyboard()
+    )
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        build_status_text(),
+        parse_mode="HTML",
+        reply_markup=build_main_keyboard()
     )
 
 async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -553,7 +560,7 @@ async def cmd_aff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_api_url
     if not context.args:
-        current_domain = current_api_url.replace("/api.php", "")
+        current_domain = get_current_domain()
         await update.message.reply_text(
             f"🌐 Domain rút gọn hiện tại: <code>{current_domain}</code>\n\n"
             f"Để đổi:\n"
@@ -565,7 +572,7 @@ async def cmd_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_domain = context.args[0].strip().rstrip("/")
     if not re.match(r'https?://', new_domain, re.I):
         new_domain = "https://" + new_domain
-    old_domain      = current_api_url.replace("/api.php", "")
+    old_domain      = get_current_domain()
     current_api_url = f"{new_domain}/api.php"
     await update.message.reply_text(
         f"✅ Đã đổi domain rút gọn!\n\n"
@@ -591,35 +598,83 @@ async def cmd_rut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not URL_REGEX.search(text):
         await update.message.reply_text("⚠️ Không tìm thấy link nào.")
         return
-    # /rut cũng áp dụng clean_text
     text = clean_text(text)
     await send_result(update, await process_rut(text))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
-
     has_shopee  = bool(SHOPEE_DIRECT_REGEX.search(text))
     has_lazada  = bool(LAZADA_REGEX.search(text))
     has_unknown = bool(SHORT_UNKNOWN_REGEX.search(text))
-
     if not has_shopee and not has_lazada and not has_unknown:
         return
-
     await update.message.reply_text("⏳ Đang xử lý...")
-
-    # Clean text TRƯỚC khi xử lý link
     text   = clean_text(text)
     result = await process_all(text)
     await send_result(update, result)
 
 # ============================================================
+# CALLBACK QUERY HANDLER (xử lý nút bấm)
+# ============================================================
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global current_aff_id, current_api_url
+    query = update.callback_query
+    await query.answer()  # tắt loading trên nút
+
+    data = query.data
+
+    # ── Toggle Domain ──────────────────────────────────────
+    if data == "toggle_domain":
+        old_domain      = get_current_domain()
+        next_domain     = get_next_domain()
+        current_api_url = f"{next_domain}/api.php"
+        await query.edit_message_text(
+            build_status_text(),
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard()
+        )
+
+    # ── Hiện danh sách Aff ID ─────────────────────────────
+    elif data == "show_aff_list":
+        await query.edit_message_text(
+            f"🔑 <b>Chọn Affiliate ID</b>\n\n"
+            f"Hiện tại: <code>{current_aff_id}</code>",
+            parse_mode="HTML",
+            reply_markup=build_aff_keyboard()
+        )
+
+    # ── Chọn một Aff ID cụ thể ────────────────────────────
+    elif data.startswith("set_aff_"):
+        new_id         = data.replace("set_aff_", "")
+        old_id         = current_aff_id
+        current_aff_id = new_id
+        await query.edit_message_text(
+            f"✅ <b>Đã đổi Affiliate ID!</b>\n\n"
+            f"Cũ: <code>{old_id}</code>\n"
+            f"Mới: <code>{current_aff_id}</code>\n\n"
+            + build_status_text(),
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard()
+        )
+
+    # ── Quay lại menu chính ───────────────────────────────
+    elif data == "back_main":
+        await query.edit_message_text(
+            build_status_text(),
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard()
+        )
+
+# ============================================================
 # FASTAPI
 # ============================================================
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
-ptb_app.add_handler(CommandHandler("start", cmd_start))
-ptb_app.add_handler(CommandHandler("rut",   cmd_rut))
-ptb_app.add_handler(CommandHandler("aff",   cmd_aff))
-ptb_app.add_handler(CommandHandler("dm",    cmd_dm))
+ptb_app.add_handler(CommandHandler("start",  cmd_start))
+ptb_app.add_handler(CommandHandler("menu",   cmd_menu))
+ptb_app.add_handler(CommandHandler("rut",    cmd_rut))
+ptb_app.add_handler(CommandHandler("aff",    cmd_aff))
+ptb_app.add_handler(CommandHandler("dm",     cmd_dm))
+ptb_app.add_handler(CallbackQueryHandler(handle_callback))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @asynccontextmanager
