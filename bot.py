@@ -13,7 +13,7 @@ BOT_TOKEN       = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL     = os.environ.get("WEBHOOK_URL")
 
 SHOPEE_SUB_ID   = "----CR--"
-SHOPEE_AFF_ID   = os.environ.get("SHOPEE_AFF_ID", "17350890105")
+SHOPEE_AFF_ID   = os.environ.get("SHOPEE_AFF_ID", "17342140095")
 current_aff_id  = SHOPEE_AFF_ID
 
 API_URL         = os.environ.get("API_URL", "https://s.allvn.top/api.php")
