@@ -62,13 +62,21 @@ SHORT_UNKNOWN_REGEX = re.compile(
     re.IGNORECASE
 )
 
+# LAZADA_REGEX = re.compile(
+#     r'(?:https?://)?'
+#     r'(?:'
+#         r'(?:s|c)\.lazada\.(?:vn|sg|co\.th|com\.my|co\.id|com\.ph)/[^\s\n\r,<>"?]*(?:\?[^\s\n\r,<>"]*)?'
+#         r'|'
+#         r'(?:www\.)?lazada\.(?:vn|sg|co\.th|com\.my|co\.id|com\.ph)/[^\s\n\r,<>"]*'
+#     r')',
+#     re.IGNORECASE
+# )
+
 LAZADA_REGEX = re.compile(
     r'(?:https?://)?'
-    r'(?:'
-        r'(?:s|c)\.lazada\.(?:vn|sg|co\.th|com\.my|co\.id|com\.ph)/[^\s\n\r,<>"?]*(?:\?[^\s\n\r,<>"]*)?'
-        r'|'
-        r'(?:www\.)?lazada\.(?:vn|sg|co\.th|com\.my|co\.id|com\.ph)/[^\s\n\r,<>"]*'
-    r')',
+    r'(?:[a-z0-9-]+\.)?'                                # bất kỳ subdomain: pages., s., c., www., ...
+    r'lazada\.(?:vn|sg|co\.th|com\.my|co\.id|com\.ph)'
+    r'/[^\s\n\r,<>"]*',
     re.IGNORECASE
 )
 
