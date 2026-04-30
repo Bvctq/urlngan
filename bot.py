@@ -12,11 +12,11 @@ from telegram.ext import (
 BOT_TOKEN       = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL     = os.environ.get("WEBHOOK_URL")
 
-SHOPEE_SUB_ID   = "----CR--"
+SHOPEE_SUB_ID   = "--BOT--"
 SHOPEE_AFF_ID   = os.environ.get("SHOPEE_AFF_ID", "17342140095")
 current_aff_id  = SHOPEE_AFF_ID
 
-API_URL         = os.environ.get("API_URL", "https://s.allvn.top/api.php")
+API_URL         = os.environ.get("API_URL", "https://s.salevn.top/api.php")
 current_api_url = API_URL
 
 LAZ_APP_KEY    = os.environ.get("LAZ_APP_KEY",    "105827")
