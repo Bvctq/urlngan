@@ -27,8 +27,8 @@ LAZ_SDK_VER    = "lazop-sdk-python-affiliate-1.0"
 
 # ========== DANH SÁCH CẤU HÌNH ==========
 DOMAIN_LIST = [
-    "https://s.allvn.top",
     "https://s.salevn.top",
+    "https://s.allvn.top",
 ]
 
 AFF_ID_LIST = [
