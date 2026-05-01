@@ -505,7 +505,7 @@ async def process_all(text: str) -> str:
         url             = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
         final_url, dest = await follow_unknown_url(url)
         if dest == "shopee":
-            final_url = final_url.replace("thanhsansale.com", "").replace("thanhsansale", "".replace("_", "".replace("hoisanma.vn", "".replace("hoisanma", "")
+            final_url = final_url.replace("thanhsansale.com", "").replace("thanhsansale", "").replace("_", "").replace("hoisanma.vn", "").replace("hoisanma", "")
             try:
                 short  = await shorten(shopee_build_aff(final_url))
                 result = result.replace(raw, short, 1)
