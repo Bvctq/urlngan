@@ -472,7 +472,7 @@ async def process_rut(text: str) -> str:
 
 async def process_shopee_direct(text: str, url: str, raw: str) -> str:
     real_url = await shopee_get_final_url(url)
-    real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "")
+    real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "").replace("_", "").replace("hoisanma.vn", "").replace("hoisanma", "")
     if re.search(r'shopee\.vn|shope\.ee', real_url, re.I):
         try:
             short = await shorten(shopee_build_aff(real_url))
