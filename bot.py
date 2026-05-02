@@ -472,7 +472,7 @@ async def process_rut(text: str) -> str:
 
 async def process_shopee_direct(text: str, url: str, raw: str) -> str:
     real_url = await shopee_get_final_url(url)
-    real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "").replace("_", "").replace("hoisanma.vn", "").replace("hoisanma", "")
+    real_url = real_url.replace("thanhsansale.com", "").replace("thanhsansale", "").replace("hoisanma.vn", "").replace("hoisanma", "")
     if re.search(r'shopee\.vn|shope\.ee', real_url, re.I):
         try:
             short = await shorten(shopee_build_aff(real_url))
@@ -505,7 +505,7 @@ async def process_all(text: str) -> str:
         url             = clean if re.match(r'https?://', clean, re.I) else "https://" + clean
         final_url, dest = await follow_unknown_url(url)
         if dest == "shopee":
-            final_url = final_url.replace("thanhsansale.com", "").replace("thanhsansale", "").replace("_", "").replace("hoisanma.vn", "").replace("hoisanma", "")
+            final_url = final_url.replace("thanhsansale.com", "").replace("thanhsansale", "").replace("hoisanma.vn", "").replace("hoisanma", "")
             try:
                 short  = await shorten(shopee_build_aff(final_url))
                 result = result.replace(raw, short, 1)
