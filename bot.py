@@ -12,7 +12,7 @@ from telegram.ext import (
 BOT_TOKEN       = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL     = os.environ.get("WEBHOOK_URL")
 
-SHOPEE_SUB_ID   = "--BOT--"
+SHOPEE_SUB_ID   = "--Nss247--"
 SHOPEE_AFF_ID   = os.environ.get("SHOPEE_AFF_ID", "17353410295")
 current_aff_id  = SHOPEE_AFF_ID
 
